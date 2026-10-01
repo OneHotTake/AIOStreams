@@ -51,9 +51,11 @@ if (commitArg) {
     commitHash = 'unknown';
   }
 }
-const commitTime = execSync('git log -1 --format=%cd --date=iso')
-  .toString()
-  .trim();
+const commitTime =
+  process.argv
+    .find((arg) => arg.startsWith('--commit-time='))
+    ?.replace('--commit-time=', '') ||
+  execSync('git log -1 --format=%cd --date=iso').toString().trim();
 
 // Create the version info object
 const versionInfo = {

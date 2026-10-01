@@ -7,6 +7,7 @@ import {
   StremioTransformer,
   Cache,
   IdParser,
+  sourceSearchContext,
 } from '@aiostreams/core';
 import { trackResource } from '../../middlewares/analytics.js';
 
@@ -55,7 +56,25 @@ router.get(
 
       const disableAutoplay = await aiostreams.shouldStopAutoPlay(type, id);
 
-      const response = await aiostreams.getStreams(id, type);
+      const controller = new AbortController();
+      const abort = () => {
+        if (!res.writableEnded) controller.abort();
+      };
+      res.once('close', abort);
+      req.once('aborted', abort);
+      let response;
+      try {
+        response = await sourceSearchContext.run(
+          {
+            maintenance: req.headers['x-aiostreams-maintenance'] === '1',
+            signal: controller.signal,
+          },
+          () => aiostreams.getStreams(id, type)
+        );
+      } finally {
+        res.removeListener('close', abort);
+        req.removeListener('aborted', abort);
+      }
       const streamContext = aiostreams.getStreamContext();
 
       if (!streamContext) {

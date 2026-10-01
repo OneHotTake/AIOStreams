@@ -45,3 +45,4 @@ export { config as appConfig } from '../config/index.js';
 export * from './formatter-definitions.js';
 export * from './template-sanitise.js';
 export * from './rclone-rc.js';
+export * from './source-search.js';
