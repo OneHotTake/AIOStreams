@@ -50,7 +50,8 @@ export async function cachedSourceSearch<T>(o: Options<T>): Promise<T> {
           until: now() + o.refreshInterval * 1000,
           failures: state?.failures ?? 0,
         },
-        Math.max(o.refreshInterval, 86400)
+        Math.max(o.refreshInterval, 86400),
+        true
       );
       try {
         const fresh = await o.fetch();
@@ -65,7 +66,8 @@ export async function cachedSourceSearch<T>(o: Options<T>): Promise<T> {
         await o.refreshState.set(
           o.key,
           { until: now() + o.refreshInterval * 1000, failures: 0 },
-          Math.max(o.refreshInterval, 86400)
+          Math.max(o.refreshInterval, 86400),
+          true
         );
         return fresh;
       } catch (error) {
@@ -73,7 +75,8 @@ export async function cachedSourceSearch<T>(o: Options<T>): Promise<T> {
           await o.refreshState.set(
             o.key,
             { until: 0, failures: state?.failures ?? 0 },
-            86400
+            86400,
+            true
           );
           throw error;
         }
@@ -82,7 +85,8 @@ export async function cachedSourceSearch<T>(o: Options<T>): Promise<T> {
         await o.refreshState.set(
           o.key,
           { until: now() + seconds * 1000, failures },
-          86400
+          86400,
+          true
         );
         throw error;
       }
@@ -113,7 +117,8 @@ export async function cachedSourceSearch<T>(o: Options<T>): Promise<T> {
     await o.refreshState.set(
       o.key,
       { until: 0, failures: previous?.failures ?? 0 },
-      86400
+      86400,
+      true
     );
     // Inline fetch to avoid recursively awaiting this same single-flight promise.
     try {
@@ -127,7 +132,8 @@ export async function cachedSourceSearch<T>(o: Options<T>): Promise<T> {
       await o.refreshState.set(
         o.key,
         { until: now() + o.refreshInterval * 1000, failures: 0 },
-        Math.max(o.refreshInterval, 86400)
+        Math.max(o.refreshInterval, 86400),
+        true
       );
       return value;
     } catch (error) {
@@ -141,7 +147,8 @@ export async function cachedSourceSearch<T>(o: Options<T>): Promise<T> {
       await o.refreshState.set(
         o.key,
         { until: now() + seconds * 1000, failures },
-        86400
+        86400,
+        true
       );
       throw error;
     }
