@@ -360,6 +360,8 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
         this.userData.checkOwned
       ),
     ]);
+    this.onProcessedSources('torrent', processedTorrents.results.length);
+    this.onProcessedSources('usenet', processedNzbs.results.length);
 
     let servers: string[] | undefined;
     const encodedNntpServers = this.userData?.services.find(
@@ -663,6 +665,12 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
     parsedId: ParsedId
   ): Promise<UnprocessedTorrent[]>;
   protected abstract _searchNzbs(parsedId: ParsedId): Promise<NZB[]>;
+
+  /** A subclass can record when its broad search yielded no validated files. */
+  protected onProcessedSources(
+    protocol: 'torrent' | 'usenet',
+    count: number
+  ): void {}
 
   protected async _getSearchMetadata(
     parsedId: ParsedId,

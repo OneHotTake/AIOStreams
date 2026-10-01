@@ -1,0 +1,25 @@
+FROM node:24.18.1-slim AS build
+ENV PNPM_HOME=/pnpm
+ENV PATH=/pnpm:$PATH
+RUN corepack enable && apt-get update && apt-get install -y --no-install-recommends python3 make g++ git && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/server/package.json ./packages/server/
+COPY packages/core/package.json ./packages/core/
+COPY packages/frontend/package.json ./packages/frontend/
+COPY packages/seanime-extensions/package.json ./packages/seanime-extensions/
+COPY packages/crypto/package.json ./packages/crypto/
+COPY patches ./patches
+RUN pnpm install --frozen-lockfile
+COPY . .
+ARG SOURCE_REVISION=uncommitted
+ARG SOURCE_TIME=2026-10-01T00:00:00Z
+RUN pnpm run metadata --channel=dev --ref=v2.34.1-season-reuse --commit=$SOURCE_REVISION --commit-time=$SOURCE_TIME && pnpm -F crypto run build && pnpm -F core run build && pnpm -F server run build && pnpm -F core run test
+FROM ghcr.io/viren070/aiostreams@sha256:70c0f2de448bcc1e39dd6a2db3f45585ab4e2d6d35761d2264047d8f38078b74
+COPY --from=build /build/packages/core/dist /app/packages/core/dist
+COPY --from=build /build/packages/server/dist /app/packages/server/dist
+COPY --from=build /build/resources/metadata.json /app/resources/metadata.json
+ARG SOURCE_REVISION=uncommitted
+LABEL org.opencontainers.image.source="https://github.com/OneHotTake/AIOStreams"
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
+LABEL org.opencontainers.image.description="AIOStreams v2.34.1 with tested season reuse and bounded maintenance search scheduling"

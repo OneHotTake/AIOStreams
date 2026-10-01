@@ -8,7 +8,12 @@ import {
 } from '../../utils/index.js';
 import { config as appConfig } from '../../config/index.js';
 import z from 'zod';
-import { searchWithBackgroundRefresh } from '../utils/general.js';
+import { cachedSourceSearch } from '../utils/search-cache.js';
+import {
+  scheduleSourceSearch,
+  sourceSearchContext,
+} from '../../utils/source-search.js';
+import { createHash } from 'node:crypto';
 
 interface ResponseMeta {
   headers: Record<string, string>;
@@ -89,13 +94,18 @@ export type ProwlarrApiSearchItem = z.infer<typeof ProwlarrApiSearchItemSchema>;
 class ProwlarrApi {
   private readonly baseUrl: string;
   private readonly apiKey: string;
+  private readonly cacheScope: string;
+  private readonly refreshState = Cache.getInstance<
+    string,
+    { until: number; failures: number }
+  >('prowlarr-api:refresh-state-v2', undefined, 'sql');
 
   private readonly baseApiPath = '/api/v1';
 
   private readonly searchCache = Cache.getInstance<
     string,
     ProwlarrApiResponse<ProwlarrApiSearchItem[]>
-  >('prowlarr-api:search');
+  >('prowlarr-api:search-v2', undefined, 'sql');
 
   private readonly indexersCache = Cache.getInstance<
     string,
@@ -112,6 +122,9 @@ class ProwlarrApi {
   constructor(config: ProwlarrConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, '');
     this.apiKey = config.apiKey;
+    this.cacheScope = createHash('sha256')
+      .update(JSON.stringify([this.baseUrl, this.apiKey]))
+      .digest('hex');
     this.#headers = {
       'Content-Type': 'application/json',
       'X-Api-Key': this.apiKey,
@@ -128,7 +141,7 @@ class ProwlarrApi {
           {},
           ProwlarrApiTagsListSchema
         ),
-      `${this.baseUrl}:tag`,
+      `${this.cacheScope}:tag`,
       appConfig.builtins.prowlarr.indexersCacheTtl
     );
   }
@@ -142,7 +155,7 @@ class ProwlarrApi {
           ProwlarrApiIndexersListSchema,
           3000
         ),
-      `${this.baseUrl}:indexer`,
+      `${this.cacheScope}:indexer`,
       appConfig.builtins.prowlarr.indexersCacheTtl
     );
   }
@@ -160,14 +173,19 @@ class ProwlarrApi {
     limit?: number;
     offset?: number;
   }): Promise<ProwlarrApiResponse<ProwlarrApiSearchItem[]>> {
-    const cacheKey = `${this.baseUrl}:${type}:${query}:${indexerIds.join(',')}:${limit}:${offset}`;
+    query = query.trim().replace(/\s+/g, ' ').toLowerCase();
+    indexerIds = [...new Set(indexerIds)].sort((a, b) => a - b);
+    const cacheKey = `${this.cacheScope}:${type}:${query}:${indexerIds.join(',')}:${limit}:${offset}`;
 
-    return searchWithBackgroundRefresh({
-      searchCache: this.searchCache,
-      searchCacheKey: cacheKey,
-      bgCacheKey: `prowlarr:${cacheKey}`,
-      cacheTTL: appConfig.builtins.prowlarr.searchCacheTtl,
-      fetchFn: () =>
+    return cachedSourceSearch({
+      cache: this.searchCache,
+      key: cacheKey,
+      refreshState: this.refreshState,
+      ttl: appConfig.builtins.prowlarr.searchCacheTtl,
+      emptyTTL: 120,
+      refreshInterval:
+        appConfig.builtins.torrent.minimumBackgroundRefreshInterval,
+      fetch: () =>
         this.request<ProwlarrApiSearchItem[]>(
           'search',
           {
@@ -179,8 +197,7 @@ class ProwlarrApi {
           },
           ProwlarrApiSearchSchema
         ),
-      isEmptyResult: (result) => result.data.length === 0,
-      logger,
+      isEmpty: (result) => result.data.length === 0,
     });
   }
 
@@ -197,12 +214,20 @@ class ProwlarrApi {
     schema: z.ZodType<T>,
     timeout?: number
   ): Promise<ProwlarrApiResponse<T>> {
+    sourceSearchContext.getStore()?.signal?.throwIfAborted();
     const { result } = await DistributedLock.getInstance().withLock(
-      `${this.getPath(endpoint)}:${JSON.stringify(params)}`,
-      () => this._request(endpoint, params, schema, timeout),
+      `${this.cacheScope}:${endpoint}:${JSON.stringify(params)}`,
+      () =>
+        endpoint === 'search'
+          ? scheduleSourceSearch(
+              this.baseUrl,
+              appConfig.builtins.scrape.queryConcurrency,
+              () => this._request(endpoint, params, schema, timeout)
+            )
+          : this._request(endpoint, params, schema, timeout),
       {
-        timeout: timeout ?? this.#timeout,
-        ttl: (timeout ?? this.#timeout) * 2,
+        timeout: (timeout ?? this.#timeout) + 25_000,
+        ttl: ((timeout ?? this.#timeout) + 25_000) * 2,
       }
     );
     return result;
@@ -237,6 +262,12 @@ class ProwlarrApi {
       method: 'GET',
       headers,
       timeout: timeout ?? this.#timeout,
+      signal: sourceSearchContext.getStore()?.signal
+        ? AbortSignal.any([
+            sourceSearchContext.getStore()!.signal!,
+            AbortSignal.timeout(timeout ?? this.#timeout),
+          ])
+        : undefined,
     });
 
     const meta: ResponseMeta = {

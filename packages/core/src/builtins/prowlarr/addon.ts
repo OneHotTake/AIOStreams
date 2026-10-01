@@ -18,6 +18,13 @@ import {
 } from '../utils/debrid.js';
 import { createQueryLimit, getTitleLanguagesForUrl } from '../utils/general.js';
 import { hashNzbUrl } from '../../debrid/utils.js';
+import { Stream } from '../../db/schemas.js';
+import { recordSourceSearch } from '../../utils/source-search.js';
+import {
+  uniqueSearchQueries,
+  seasonSearchQueries,
+  selectSeasonResults,
+} from './season-search.js';
 
 export const ProwlarrAddonConfigSchema = BaseDebridConfigSchema.extend({
   url: z.string(),
@@ -44,6 +51,48 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
   private readonly indexers: string[] = [];
   private readonly tags: string[] = [];
   private readonly sources: string[] = [];
+  private readonly seasonProtocols = new Set<'torrent' | 'usenet'>();
+  private readonly exactProtocols = new Set<'torrent' | 'usenet'>();
+  private readonly unmatchedProtocols = new Set<'torrent' | 'usenet'>();
+
+  protected onProcessedSources(
+    protocol: 'torrent' | 'usenet',
+    count: number
+  ): void {
+    if (
+      count === 0 &&
+      this.seasonProtocols.has(protocol) &&
+      !this.exactProtocols.has(protocol)
+    )
+      this.unmatchedProtocols.add(protocol);
+  }
+  public async getStreams(type: string, id: string): Promise<Stream[]> {
+    this.seasonProtocols.clear();
+    this.exactProtocols.clear();
+    this.unmatchedProtocols.clear();
+    const first = await super.getStreams(type, id);
+    if (this.unmatchedProtocols.size === 0) return first;
+    // At most one exact fallback per protocol. A season pack is a candidate,
+    // never proof of a validated playable episode or provider availability.
+    for (const protocol of this.unmatchedProtocols)
+      this.exactProtocols.add(protocol);
+    const second = await super.getStreams(type, id);
+    const seen = new Set<string>();
+    return [...first, ...second].filter((s) => {
+      const key = JSON.stringify([
+        s.url,
+        s.nzbUrl,
+        s.infoHash,
+        s.fileIdx,
+        s.externalUrl,
+        s.name,
+        s.description,
+      ]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
   constructor(config: ProwlarrAddonConfig, clientIp?: string) {
     super(config, ProwlarrAddonConfigSchema, clientIp);
 
@@ -199,33 +248,62 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
       return [];
     }
 
-    const queries = this.buildQueries(parsedId, metadata, {
-      titleLanguages: getTitleLanguagesForUrl(this.userData.url, this.id),
-    });
+    const queries = uniqueSearchQueries(
+      this.buildQueries(parsedId, metadata, {
+        titleLanguages: getTitleLanguagesForUrl(this.userData.url, this.id),
+      })
+    );
     if (queries.length === 0) {
       return [];
     }
 
-    const searchPromises = queries.map((q) =>
-      queryLimit(async () => {
-        const start = Date.now();
-        const { data } = await this.api.search({
-          query: q,
-          indexerIds: chosenIndexers.map((indexer) => indexer.id),
-          type: 'search',
-          limit: 2000,
-        });
-        this.logger.info(
-          `Prowlarr ${protocol} search for ${q} took ${getTimeTakenSincePoint(start)}`,
-          {
-            results: data.length,
-          }
-        );
-        return data;
-      })
-    );
-    const allResults = await Promise.all(searchPromises);
-    return allResults.flat();
+    const search = (batch: string[]) =>
+      Promise.all(
+        batch.map((q) =>
+          queryLimit(async () => {
+            const start = Date.now();
+            const { data } = await this.api.search({
+              query: q,
+              indexerIds: chosenIndexers.map((indexer) => indexer.id),
+              type: 'search',
+              limit: 2000,
+            });
+            this.logger.info(
+              `Prowlarr ${protocol} search for ${q} took ${getTimeTakenSincePoint(start)}`,
+              {
+                results: data.length,
+              }
+            );
+            return data;
+          })
+        )
+      ).then((results) => results.flat());
+    const season = Number(parsedId.season),
+      episode = Number(parsedId.episode);
+    const broad =
+      parsedId.mediaType === 'series' &&
+      season > 0 &&
+      episode > 0 &&
+      !metadata.isDateBased
+        ? seasonSearchQueries(queries, season)
+        : [];
+    if (broad.length === 0) return search(queries);
+    const exact = queries.filter((q) => !broad.includes(q));
+    if (this.exactProtocols.has(protocol)) {
+      recordSourceSearch('episodeFallbacks');
+      return search(exact);
+    }
+    const inventory = await search(broad);
+    const matches = selectSeasonResults(inventory, season, episode);
+    // A capped raw result page cannot establish complete season coverage.
+    if (matches.length > 0 && inventory.length < 2000) {
+      this.seasonProtocols.add(protocol);
+      recordSourceSearch('seasonReused');
+      return matches;
+    }
+    this.exactProtocols.add(protocol);
+    recordSourceSearch('episodeFallbacks');
+    return [...matches, ...(await search(exact))];
   }
 
   protected async _searchTorrents(

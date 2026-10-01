@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   createLogger,
+  sourceSearchMetrics,
   logRingBuffer,
   settingsStore,
   describeSettings,
@@ -38,6 +39,9 @@ const logger = createLogger('dashboard');
 
 // Every /dashboard/* route is admin-only.
 router.use(requireAdmin);
+router.get('/source-searches', (_req, res) => {
+  res.json(createResponse({ success: true, data: sourceSearchMetrics() }));
+});
 
 // Native usenet engine: stats, providers, library.
 router.use('/usenet', usenetDashboard);
